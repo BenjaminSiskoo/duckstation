@@ -168,6 +168,8 @@ static void ExecuteImpl()
         CheckAndUpdateICacheTags(block->icache_line_count, block->uncached_fetch_ticks);
 
       InterpretCachedBlock<pgxp_mode>(*block);
+      if (block->is_idle_loop)
+        IdleSkip();
 
       if (g_state.pending_ticks >= g_state.downcount)
         break;
@@ -387,6 +389,57 @@ recompile:
   return true;
 }
 
+static bool IsIdleLoop(u32 pc)
+{
+  struct InstructionAndMask
+  {
+    u32 instruction;
+    u32 mask;
+  };
+
+  static constexpr InstructionAndMask idle_1[] = {
+    {0x8fa20000, 0xFFFF0000}, // lw v0, 16(sp)
+    {0x00000000, 0xFFFFFFFF}, // sll $zero, $zero, 0
+    {0x2442ffff, 0xFFFFFFFF}, // addiu v0, v0, ffff
+    {0xafa20000, 0xFFFF0000}, // sw v0, 16(sp)
+    {0x8fa20000, 0xFFFF0000}, // lw v0, 16(sp)
+    {0x00000000, 0xFFFFFFFF}, // sll $zero, $zero, 0
+    {0x1443000b, 0xFFFFFFFF}, // bne v0, v1, 8003228c
+    {0x00000000, 0x00000000}, // sll $zero, $zero, 0
+    {0x00000000, 0x00000000}, // lui a0, 8005
+    {0x00000000, 0x00000000}, // jal 80045864
+    {0x00000000, 0x00000000}, // addiu a0, a0, d850
+    {0x00000000, 0x00000000}, // jal 800322b4
+    {0x00000000, 0x00000000}, // addu a0, $zero, $zero
+    {0x00000000, 0x00000000}, // addiu a0, $zero, 0003
+    {0x00000000, 0x00000000}, // jal 80031f24
+    {0x00000000, 0x00000000}, // addu a1, $zero, $zero
+    {0x00000000, 0x00000000}, // j 800322a4
+    {0x00000000, 0xFFFFFFFF}, // sll $zero, $zero, 0
+    {0x3c020000, 0xFFFF0000}, // lui v0, 8007
+    {0x8c420000, 0xFFFF0000}, // lw v0, -23808(v0)
+    {0x00000000, 0xFFFFFFFF}, // sll $zero, $zero, 0
+    {0x0044102a, 0xFFFFFFFF}, // slt v0, v0, a0
+    {0x1440ffe9, 0xFFFFFFFF}, // bne v0, $zero, 80032244
+  };
+
+  u32 current_pc = pc;
+  bool match = true;
+  for (const InstructionAndMask& im : idle_1)
+  {
+    u32 instruction;
+    if (!SafeReadInstruction(current_pc, &instruction) || (instruction & im.mask) != im.instruction)
+    {
+      match = false;
+      break;
+    }
+
+    current_pc += sizeof(u32);
+  }
+
+  return match;
+}
+
 bool CompileBlock(CodeBlock* block)
 {
   u32 pc = block->GetPC();
@@ -397,6 +450,10 @@ bool CompileBlock(CodeBlock* block)
   if (pc == 0x0005aa90)
     __debugbreak();
 #endif
+
+  block->is_idle_loop = IsIdleLoop(pc);
+  if (block->is_idle_loop)
+    Log_InfoPrintf("Idle loop found at 0x%08X", pc);
 
   u32 last_cache_line = ICACHE_LINES;
 
